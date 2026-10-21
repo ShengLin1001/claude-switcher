@@ -1,6 +1,6 @@
 #!/bin/bash
 # Claude 账号切换器 - Linux 核心脚本
-# 用法: claude-switch.sh checkdetail|status|fix|switch A|B|menu
+# 用法: claude-switch.sh checkdetail|status|fix|switch A|B|menu|pinrules
 set -u
 export LC_ALL=en_US.UTF-8
 
@@ -21,6 +21,36 @@ log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $1" >>"$LOG"; }
 
 tun_up() { ip addr 2>/dev/null | grep -q 'inet 198\.18\.'; }
 core_up() { pgrep -f 'verge-mihomo|mihomo' >/dev/null 2>&1; }
+
+# 只认 rules: 段内的条目:Clash Verge Rev 新版把 Merge 里的 prepend-rules 原样留在顶层且不生效,全文 grep 会误报
+rules_pinned() {
+    awk -v pat="DOMAIN-SUFFIX,claude.ai,$PROXY_GROUP" '/^rules:/{r=1; next} /^[^ -]/{r=0} r && index($0, pat){f=1} END{exit !f}' \
+        "$CLASH_DIR/clash-verge.yaml" 2>/dev/null
+}
+
+# 用全局扩展脚本 Script.js 把置顶规则插到 rules 最前;用户自写的脚本不覆盖
+pin_rules() {
+    local f="$CLASH_DIR/profiles/Script.js"
+    local re='^functionmain\(config(,profileName)?\)\{returnconfig;?\}$'
+    if [ -f "$f" ] && ! grep -q 'claude-switcher' "$f" && [[ ! "$(sed 's#//.*##' "$f" | tr -d ' \t\r\n')" =~ $re ]]; then
+        echo "FIX:Script.js 已有自定义内容,未覆盖;请把 Claude 置顶规则手动加进该脚本 ✗"
+        return 1
+    fi
+    mkdir -p "$CLASH_DIR/profiles"
+    cat > "$f" <<JSEOF
+// claude-switcher: Claude 域名置顶规则,由切换器生成,重装/一键修复会覆盖本文件
+// Clash Verge Rev 新版不再处理 Merge.yaml 里的 prepend-rules,改由全局扩展脚本插到 rules 最前
+function main(config, profileName) {
+  var pinned = ['claude.ai', 'claude.com', 'anthropic.com', 'claudeusercontent.com', 'challenges.cloudflare.com',
+    'datadoghq.com', 'segment.io', 'stripe.com', 'stripe.network', 'stripecdn.com',
+    'intercom.io', 'intercomcdn.com', 'intercomassets.com'];
+  var head = [];
+  for (var i = 0; i < pinned.length; i++) head.push('DOMAIN-SUFFIX,' + pinned[i] + ',$PROXY_GROUP');
+  config.rules = head.concat(config.rules || []);
+  return config;
+}
+JSEOF
+}
 
 dns_query() {
     # dig → nslookup → getent 逐级回退
@@ -82,8 +112,7 @@ checkdetail() {
         echo '保镖=fail:未运行'
     fi
 
-    grep -q "DOMAIN-SUFFIX,claude.ai,$PROXY_GROUP" "$CLASH_DIR/clash-verge.yaml" 2>/dev/null \
-        && echo '规则置顶=ok' || echo '规则置顶=fail:未生效'
+    rules_pinned && echo '规则置顶=ok' || echo '规则置顶=fail:未生效'
 
     echo '客户端语言=ok:跟随系统'
 
@@ -96,7 +125,8 @@ checkdetail() {
 
     r1=$(curl -s --max-time 8 -o /dev/null -w '%{http_code}' https://claude.ai/ 2>/dev/null)
     r2=$(curl -s --max-time 8 -o /dev/null -w '%{http_code}' https://api.anthropic.com/v1/models 2>/dev/null)
-    if [ "$r1" != "000" ] && [ "$r2" != "000" ]; then
+    # 白名单判定:curl 缺失时结果为空,只排除 000 会放行
+    if [[ "$r1" =~ ^[1-5][0-9]{2}$ && "$r2" =~ ^[1-5][0-9]{2}$ ]]; then
         echo "生态可达性=ok:claude.ai:$r1 api:$r2"
     else
         echo "生态可达性=fail:claude.ai:$r1 api:$r2"
@@ -156,29 +186,9 @@ EOF
     fi
 
     # 置顶规则
-    if ! grep -q "DOMAIN-SUFFIX,claude.ai,$PROXY_GROUP" "$CLASH_DIR/clash-verge.yaml" 2>/dev/null; then
+    if ! rules_pinned; then
         echo "FIX:重写置顶规则..."
-        mkdir -p "$CLASH_DIR/profiles"
-        cat > "$CLASH_DIR/profiles/Merge.yaml" <<MEOF
-profile:
-  store-selected: true
-
-prepend-rules:
-  - DOMAIN-SUFFIX,claude.ai,$PROXY_GROUP
-  - DOMAIN-SUFFIX,claude.com,$PROXY_GROUP
-  - DOMAIN-SUFFIX,anthropic.com,$PROXY_GROUP
-  - DOMAIN-SUFFIX,claudeusercontent.com,$PROXY_GROUP
-  - DOMAIN-SUFFIX,challenges.cloudflare.com,$PROXY_GROUP
-  - DOMAIN-SUFFIX,datadoghq.com,$PROXY_GROUP
-  - DOMAIN-SUFFIX,segment.io,$PROXY_GROUP
-  - DOMAIN-SUFFIX,stripe.com,$PROXY_GROUP
-  - DOMAIN-SUFFIX,stripe.network,$PROXY_GROUP
-  - DOMAIN-SUFFIX,stripecdn.com,$PROXY_GROUP
-  - DOMAIN-SUFFIX,intercom.io,$PROXY_GROUP
-  - DOMAIN-SUFFIX,intercomcdn.com,$PROXY_GROUP
-  - DOMAIN-SUFFIX,intercomassets.com,$PROXY_GROUP
-MEOF
-        echo "FIX:置顶规则已写入(请重启 Clash Verge 生效)"
+        pin_rules && echo "FIX:置顶规则已写入(请重启 Clash Verge 生效)"
     fi
 
     sleep 2
@@ -276,5 +286,6 @@ case "${1:-menu}" in
     status) status ;;
     fix) fix ;;
     switch) switch_to "${2:-}" ;;
+    pinrules) pin_rules ;;
     menu|*) menu ;;
 esac

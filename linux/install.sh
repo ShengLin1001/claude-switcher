@@ -44,28 +44,8 @@ chmod +x "$BASE/claude-switch.sh" "$BASE/claude-bodyguard.sh"
 sed -i "s|^TZ_TARGET=\".*\"|TZ_TARGET=\"$TZV\"|; s|^PROXY_GROUP=\".*\"|PROXY_GROUP=\"$GRP\"|" "$BASE/claude-switch.sh"
 echo "✓ 核心文件已安装到 $BASE"
 
-# ---- 置顶规则 ----
-mkdir -p "$CLASH_DIR/profiles"
-cat > "$CLASH_DIR/profiles/Merge.yaml" <<EOF
-profile:
-  store-selected: true
-
-prepend-rules:
-  - DOMAIN-SUFFIX,claude.ai,$GRP
-  - DOMAIN-SUFFIX,claude.com,$GRP
-  - DOMAIN-SUFFIX,anthropic.com,$GRP
-  - DOMAIN-SUFFIX,claudeusercontent.com,$GRP
-  - DOMAIN-SUFFIX,challenges.cloudflare.com,$GRP
-  - DOMAIN-SUFFIX,datadoghq.com,$GRP
-  - DOMAIN-SUFFIX,segment.io,$GRP
-  - DOMAIN-SUFFIX,stripe.com,$GRP
-  - DOMAIN-SUFFIX,stripe.network,$GRP
-  - DOMAIN-SUFFIX,stripecdn.com,$GRP
-  - DOMAIN-SUFFIX,intercom.io,$GRP
-  - DOMAIN-SUFFIX,intercomcdn.com,$GRP
-  - DOMAIN-SUFFIX,intercomassets.com,$GRP
-EOF
-echo "✓ Claude 域名置顶规则已写入(重启 Clash Verge 生效)"
+# ---- 置顶规则(由核心脚本写全局扩展脚本 Script.js,域名名单只维护一份) ----
+"$BASE/claude-switch.sh" pinrules && echo "✓ Claude 域名置顶规则已写入(重启 Clash Verge 生效)"
 
 # ---- 保镖 systemd 用户服务(免 sudo 常驻) ----
 mkdir -p "$HOME/.config/systemd/user"

@@ -119,30 +119,8 @@ rm -rf "$H/Desktop/Claude切换器.app"
 cp -R "files/Claude切换器.app" "$H/Desktop/"
 echo "✓ App 已放到桌面"
 
-# ---- 5. 写入置顶规则 ----
-cat > "$CLASH_DIR/profiles/Merge.yaml" <<EOF
-# Profile Enhancement Merge Template for Clash Verge
-
-profile:
-  store-selected: true
-
-# Claude 全家族及生态域名置顶强制走代理
-prepend-rules:
-  - DOMAIN-SUFFIX,claude.ai,$GRP
-  - DOMAIN-SUFFIX,claude.com,$GRP
-  - DOMAIN-SUFFIX,anthropic.com,$GRP
-  - DOMAIN-SUFFIX,claudeusercontent.com,$GRP
-  - DOMAIN-SUFFIX,challenges.cloudflare.com,$GRP
-  - DOMAIN-SUFFIX,datadoghq.com,$GRP
-  - DOMAIN-SUFFIX,segment.io,$GRP
-  - DOMAIN-SUFFIX,stripe.com,$GRP
-  - DOMAIN-SUFFIX,stripe.network,$GRP
-  - DOMAIN-SUFFIX,stripecdn.com,$GRP
-  - DOMAIN-SUFFIX,intercom.io,$GRP
-  - DOMAIN-SUFFIX,intercomcdn.com,$GRP
-  - DOMAIN-SUFFIX,intercomassets.com,$GRP
-EOF
-echo "✓ Claude 域名置顶规则已写入(重启 Clash Verge 后生效)"
+# ---- 5. 写入置顶规则(由核心脚本写全局扩展脚本 Script.js,域名名单只维护一份) ----
+"$H/.local/bin/claude-switch.sh" pinrules && echo "✓ Claude 域名置顶规则已写入(重启 Clash Verge 后生效)"
 
 # ---- 6. 系统级配置(需要一次密码) ----
 if [ -n "$DRYRUN" ]; then

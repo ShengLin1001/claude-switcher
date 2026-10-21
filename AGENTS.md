@@ -32,7 +32,7 @@
    swiftc -O -parse-as-library app/main.swift -o Claude切换器.app/Contents/MacOS/ClaudeSwitcher -framework SwiftUI -framework AppKit
    ```
    图标已在 `assets/` 里，打进 `Contents/Resources/AppIcon.icns` 并在 `Info.plist` 声明 `CFBundleIconFile`
-6. 把 `installer/` 里的置顶规则写入 Clash Verge 的「全局扩展配置」(Merge.yaml)，重启 Clash Verge 使生效
+6. 运行 `claude-switch.sh pinrules` 把置顶规则写入全局扩展脚本 `profiles/Script.js`，重启 Clash Verge 使生效。不要用 Merge.yaml 的 `prepend-rules`：Clash Verge Rev 新版不会把它合并进 `rules:`。验收看 `clash-verge.yaml` 的 `rules:` 段，不要全文 grep
 7. 时区与 IPv6：`systemsetup -settimezone <TZ_TARGET>`、`networksetup -setv6off Wi-Fi`（需管理员）
 
 ## 验收标准（全部满足才算装完）
