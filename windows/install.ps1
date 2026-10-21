@@ -14,7 +14,7 @@ if (-not (Test-Path $CLASH_DIR)) { Write-Host "X 未检测到 Clash Verge,请先
 Write-Host "[OK] 前置检查通过" -ForegroundColor Green
 
 # ---- 1. 出口必须是美国(否则时区会锁错) ----
-$info = try { (& curl.exe -s --max-time 8 "https://ipinfo.io/json" 2>$null | ConvertFrom-Json) } catch { $null }
+$info = try { (& "$env:SystemRoot\System32\curl.exe" -s --max-time 8 "https://ipinfo.io/json" 2>$null | ConvertFrom-Json) } catch { $null }
 if (-not $info -or $info.country -ne 'US') {
     Write-Host "X 当前出口不在美国($($info.country)),请先开启代理(TUN模式)再运行" -ForegroundColor Red
     pause; exit 1
@@ -66,28 +66,10 @@ $sc.WorkingDirectory = $BASE
 $sc.Save()
 Write-Host "[OK] 桌面快捷方式已创建" -ForegroundColor Green
 
-# ---- 6. 置顶规则 ----
-New-Item -ItemType Directory -Force -Path "$CLASH_DIR\profiles" | Out-Null
-@"
-profile:
-  store-selected: true
-
-prepend-rules:
-  - DOMAIN-SUFFIX,claude.ai,$grp
-  - DOMAIN-SUFFIX,claude.com,$grp
-  - DOMAIN-SUFFIX,anthropic.com,$grp
-  - DOMAIN-SUFFIX,claudeusercontent.com,$grp
-  - DOMAIN-SUFFIX,challenges.cloudflare.com,$grp
-  - DOMAIN-SUFFIX,datadoghq.com,$grp
-  - DOMAIN-SUFFIX,segment.io,$grp
-  - DOMAIN-SUFFIX,stripe.com,$grp
-  - DOMAIN-SUFFIX,stripe.network,$grp
-  - DOMAIN-SUFFIX,stripecdn.com,$grp
-  - DOMAIN-SUFFIX,intercom.io,$grp
-  - DOMAIN-SUFFIX,intercomcdn.com,$grp
-  - DOMAIN-SUFFIX,intercomassets.com,$grp
-"@ | Out-File -Encoding utf8 "$CLASH_DIR\profiles\Merge.yaml"
-Write-Host "[OK] Claude 域名置顶规则已写入(重启 Clash Verge 后生效)" -ForegroundColor Green
+# ---- 6. 置顶规则(由核心脚本写全局扩展脚本 Script.js,域名名单只维护一份) ----
+$warn = & "$BASE\claude-switch.ps1" pinrules
+if ($warn) { Write-Host "! $warn" -ForegroundColor Yellow }
+else { Write-Host "[OK] Claude 域名置顶规则已写入(重启 Clash Verge 后生效)" -ForegroundColor Green }
 
 # ---- 7. 系统级配置 ----
 Set-TimeZone -Id $tzId
@@ -103,10 +85,11 @@ Start-ScheduledTask -TaskName 'ClaudeBodyguard'
 Write-Host "[OK] 保镖已注册并启动(计划任务,登录自动运行)" -ForegroundColor Green
 
 # ---- 9. 重启 Clash 使规则生效 ----
+# 杀进程前先取运行路径;旧逻辑只搜 %LOCALAPPDATA%\Programs,装在别的盘就拉不起来
+$cv = (Get-Process -Name 'clash-verge' -ErrorAction SilentlyContinue | Select-Object -First 1).Path
 Get-Process -Name 'clash-verge','Clash Verge' -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep 2
-$cv = Get-ChildItem "$env:LOCALAPPDATA\Programs" -Recurse -Filter 'Clash Verge*.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
-if ($cv) { Start-Process $cv.FullName }
+if ($cv) { Start-Process $cv } else { Write-Host "! 未找到 Clash Verge 进程路径,请手动重新打开 Clash Verge" -ForegroundColor Yellow }
 
 Write-Host ""
 Write-Host "==================================" -ForegroundColor Green

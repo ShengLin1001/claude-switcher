@@ -1,5 +1,5 @@
 ﻿# Claude 账号切换器 - Windows 核心脚本
-# 用法: powershell -NoProfile -File claude-switch.ps1 check|status|switch A|B|checkdetail|fix
+# 用法: powershell -NoProfile -File claude-switch.ps1 check|status|switch A|B|checkdetail|fix|pinrules
 $ErrorActionPreference = 'Continue'
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}
 
@@ -12,6 +12,8 @@ $BASE = Join-Path $env:USERPROFILE ".claude-switcher"
 $DATA = Join-Path $env:APPDATA "Claude"
 $LOG  = Join-Path $BASE "claude-switch.log"
 $CLASH_DIR = Join-Path $env:APPDATA "io.github.clash-verge-rev.clash-verge-rev"
+# 绝对路径:被精简 PATH 的环境拉起时 curl.exe 会找不到
+$CURL = Join-Path $env:SystemRoot "System32\curl.exe"
 New-Item -ItemType Directory -Force -Path "$BASE\accounts" | Out-Null
 
 function Log($m) { "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') $m" | Out-File -Append -Encoding utf8 $LOG }
@@ -20,9 +22,9 @@ function Test-CoreUp { [bool](Get-Process -Name 'verge-mihomo' -ErrorAction Sile
 function Test-TunUp  { [bool](Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -like '198.18.*' }) }
 
 function Get-Egress {
-    $trace = & curl.exe -s --max-time 8 "https://www.cloudflare.com/cdn-cgi/trace" 2>$null
-    $ip  = (($trace -split "`n" | Where-Object { $_ -like 'ip=*' })  -replace 'ip=','').Trim()
-    $loc = (($trace -split "`n" | Where-Object { $_ -like 'loc=*' }) -replace 'loc=','').Trim()
+    $trace = & $CURL -s --max-time 8 "https://www.cloudflare.com/cdn-cgi/trace" 2>$null | Out-String
+    $ip  = if ($trace -match '(?m)^ip=(\S+)')  { $Matches[1] } else { '' }
+    $loc = if ($trace -match '(?m)^loc=(\S+)') { $Matches[1] } else { '' }
     return @{ ip = $ip; loc = $loc }
 }
 
@@ -70,7 +72,51 @@ function Test-WebRTC($exitIp) {
     return @{ code = 'ok'; detail = '仅暴露代理IP' }
 }
 
-function Test-RulesPinned { Test-Path "$CLASH_DIR\clash-verge.yaml" -and (Select-String -Path "$CLASH_DIR\clash-verge.yaml" -Pattern "DOMAIN-SUFFIX,claude.ai,$PROXY_GROUP" -Quiet) }
+# 只认 rules: 段内的条目:Clash Verge Rev 新版把 Merge 里的 prepend-rules 原样留在顶层且不生效,全文搜索会误报
+function Test-RulesPinned {
+    $f = "$CLASH_DIR\clash-verge.yaml"
+    if (-not (Test-Path $f)) { return $false }
+    $inRules = $false
+    foreach ($line in Get-Content $f -Encoding utf8) {
+        if ($line -match '^rules:') { $inRules = $true; continue }
+        if ($line -match '^[^ -]') { $inRules = $false }
+        if ($inRules -and $line.Contains("DOMAIN-SUFFIX,claude.ai,$PROXY_GROUP")) { return $true }
+    }
+    return $false
+}
+
+# 用全局扩展脚本 Script.js 把置顶规则插到 rules 最前;用户自写的脚本不覆盖,此时返回提示行,成功返回空
+function Set-PinScript {
+    $f = "$CLASH_DIR\profiles\Script.js"
+    if (Test-Path $f) {
+        $s = Get-Content $f -Raw -Encoding utf8
+        $bare = ($s -replace '//.*', '') -replace '\s', ''
+        if ($s -notmatch 'claude-switcher' -and $bare -notmatch '^functionmain\(config(,profileName)?\)\{returnconfig;?\}$') {
+            return "FIX:Script.js 已有自定义内容,未覆盖;请把 Claude 置顶规则手动加进该脚本 ✗"
+        }
+    }
+    New-Item -ItemType Directory -Force -Path "$CLASH_DIR\profiles" | Out-Null
+    $js = @"
+// claude-switcher: Claude 域名置顶规则,由切换器生成,重装/一键修复会覆盖本文件
+// Clash Verge Rev 新版不再处理 Merge.yaml 里的 prepend-rules,改由全局扩展脚本插到 rules 最前
+function main(config, profileName) {
+  var pinned = ['claude.ai', 'claude.com', 'anthropic.com', 'claudeusercontent.com', 'challenges.cloudflare.com',
+    'datadoghq.com', 'segment.io', 'stripe.com', 'stripe.network', 'stripecdn.com',
+    'intercom.io', 'intercomcdn.com', 'intercomassets.com'];
+  var head = [];
+  for (var i = 0; i < pinned.length; i++) head.push('DOMAIN-SUFFIX,' + pinned[i] + ',$PROXY_GROUP');
+  config.rules = head.concat(config.rules || []);
+  return config;
+}
+"@
+    [IO.File]::WriteAllText($f, $js)
+}
+
+# TUN 网卡每次重建都默认带 IPv6 绑定,但它走代理、Clash ipv6:false 时也无 v6 地址,不算直连泄漏;只看其余网卡
+function Get-V6Binding {
+    $tunNics = @((Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -like '198.18.*' }).InterfaceAlias)
+    Get-NetAdapterBinding -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue | Where-Object { $_.Enabled -and $_.Name -notin $tunNics }
+}
 
 function Invoke-CheckDetail {
     if (Test-CoreUp) { "代理内核=ok" } else { "代理内核=fail:未运行" }
@@ -93,8 +139,8 @@ function Invoke-CheckDetail {
     $cult = (Get-Culture).Name
     if ($cult -eq 'en-US') { "地区=ok" } else { "地区=fail:$cult" }
 
-    $v6off = [bool](Get-NetAdapterBinding -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue | Where-Object { $_.Enabled -eq $true })
-    if (-not $v6off) { "IPv6=ok:已关闭" } else { "IPv6=fail:未关闭" }
+    $v6on = @(Get-V6Binding)
+    if ($v6on.Count -eq 0) { "IPv6=ok:已关闭" } else { "IPv6=fail:未关闭($($v6on.Name -join ','))" }
 
     $dns = (Resolve-DnsName claude.ai -Type A -ErrorAction SilentlyContinue | Select-Object -First 1).IPAddress
     if ($dns -like '198.18.*') { "DNS=ok:走隧道" } else { "DNS=fail:未走隧道($dns)" }
@@ -111,14 +157,15 @@ function Invoke-CheckDetail {
     "客户端语言=ok:跟随系统"
 
     $org = ''
-    try { $org = ((& curl.exe -s --max-time 6 "https://ipinfo.io/json" 2>$null) | ConvertFrom-Json).org } catch {}
+    try { $org = ((& $CURL -s --max-time 6 "https://ipinfo.io/json" 2>$null) | ConvertFrom-Json).org } catch {}
     if (-not $org) { "ASN属性=warn:未获取" }
     elseif ($org -match 'Comcast|AT&T|Verizon|Spectrum|Charter|Cox|T-Mobile|Cable|esidential') { "ASN属性=ok:$org" }
     else { "ASN属性=warn:疑似机房($org)" }
 
-    $r1 = & curl.exe -s --max-time 8 -o NUL -w '%{http_code}' "https://claude.ai/" 2>$null
-    $r2 = & curl.exe -s --max-time 8 -o NUL -w '%{http_code}' "https://api.anthropic.com/v1/models" 2>$null
-    if ($r1 -ne '000' -and $r2 -ne '000') { "生态可达性=ok:claude.ai:$r1 api:$r2" } else { "生态可达性=fail:claude.ai:$r1 api:$r2" }
+    $r1 = & $CURL -s --max-time 8 -o NUL -w '%{http_code}' "https://claude.ai/" 2>$null
+    $r2 = & $CURL -s --max-time 8 -o NUL -w '%{http_code}' "https://api.anthropic.com/v1/models" 2>$null
+    # 白名单判定:curl 没跑起来时结果为空,用 -ne '000' 会误判为 ok
+    if ($r1 -match '^[1-5]\d\d$' -and $r2 -match '^[1-5]\d\d$') { "生态可达性=ok:claude.ai:$r1 api:$r2" } else { "生态可达性=fail:claude.ai:$r1 api:$r2" }
 }
 
 function Invoke-Fix {
@@ -127,8 +174,8 @@ function Invoke-Fix {
     # A. 拉起 Clash Verge 并等待内核+TUN
     if (-not (Test-CoreUp)) {
         "FIX:正在启动 Clash Verge..."
-        $cv = Get-ChildItem "$env:LOCALAPPDATA\Programs","$env:ProgramFiles","${env:ProgramFiles(x86)}" -Recurse -Filter "Clash Verge*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($cv) { Start-Process $cv.FullName } else { "FIX:未找到 Clash Verge 可执行文件,请手动启动" }
+        $cv = Get-ClashExe
+        if ($cv) { Start-Process $cv } else { "FIX:未找到 Clash Verge 可执行文件,请手动启动" }
     }
     $ok = $false
     for ($i = 0; $i -lt 40; $i++) { if ((Test-CoreUp) -and (Test-TunUp)) { $ok = $true; break }; Start-Sleep 1 }
@@ -137,7 +184,7 @@ function Invoke-Fix {
     # B. 时区/IPv6/DNS/保镖(需管理员:通过 UAC 弹一次)
     $adminScript = @()
     if ((Get-TimeZone).Id -ne $TZ_TARGET) { $adminScript += "Set-TimeZone -Id '$TZ_TARGET'" }
-    if (Get-NetAdapterBinding -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue | Where-Object { $_.Enabled }) { $adminScript += "Get-NetAdapterBinding -ComponentID ms_tcpip6 | Disable-NetAdapterBinding -Confirm:`$false" }
+    if (Get-V6Binding) { $adminScript += "Get-NetAdapterBinding -ComponentID ms_tcpip6 | Disable-NetAdapterBinding -Confirm:`$false" }
     $adminScript += "Clear-DnsClientCache"
     if (-not (Get-ScheduledTask -TaskName 'ClaudeBodyguard' -ErrorAction SilentlyContinue)) {
         $adminScript += "`$a = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$BASE\claude-bodyguard.ps1`"'; `$t = New-ScheduledTaskTrigger -AtLogOn; Register-ScheduledTask -TaskName 'ClaudeBodyguard' -Action `$a -Trigger `$t -Force | Out-Null; Start-ScheduledTask -TaskName 'ClaudeBodyguard'"
@@ -156,33 +203,15 @@ function Invoke-Fix {
     # B2. 置顶规则
     if (-not (Test-RulesPinned)) {
         "FIX:重写置顶规则..."
-        $merge = @"
-profile:
-  store-selected: true
-
-prepend-rules:
-  - DOMAIN-SUFFIX,claude.ai,$PROXY_GROUP
-  - DOMAIN-SUFFIX,claude.com,$PROXY_GROUP
-  - DOMAIN-SUFFIX,anthropic.com,$PROXY_GROUP
-  - DOMAIN-SUFFIX,claudeusercontent.com,$PROXY_GROUP
-  - DOMAIN-SUFFIX,challenges.cloudflare.com,$PROXY_GROUP
-  - DOMAIN-SUFFIX,datadoghq.com,$PROXY_GROUP
-  - DOMAIN-SUFFIX,segment.io,$PROXY_GROUP
-  - DOMAIN-SUFFIX,stripe.com,$PROXY_GROUP
-  - DOMAIN-SUFFIX,stripe.network,$PROXY_GROUP
-  - DOMAIN-SUFFIX,stripecdn.com,$PROXY_GROUP
-  - DOMAIN-SUFFIX,intercom.io,$PROXY_GROUP
-  - DOMAIN-SUFFIX,intercomcdn.com,$PROXY_GROUP
-  - DOMAIN-SUFFIX,intercomassets.com,$PROXY_GROUP
-"@
-        New-Item -ItemType Directory -Force -Path "$CLASH_DIR\profiles" | Out-Null
-        $merge | Out-File -Encoding utf8 "$CLASH_DIR\profiles\Merge.yaml"
-        Get-Process -Name 'clash-verge','Clash Verge' -ErrorAction SilentlyContinue | Stop-Process -Force
-        Start-Sleep 2
-        $cv = Get-ChildItem "$env:LOCALAPPDATA\Programs" -Recurse -Filter "Clash Verge*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($cv) { Start-Process $cv.FullName }
-        for ($i = 0; $i -lt 40; $i++) { if (Test-TunUp) { break }; Start-Sleep 1 }
-        if (Test-RulesPinned) { "FIX:置顶规则 ✓" } else { "FIX:置顶规则 ✗(请重启 Clash Verge)" }
+        $warn = Set-PinScript
+        if ($warn) { $warn } else {
+            $cv = Get-ClashExe   # 必须在杀进程前取,杀完就拿不到运行路径了
+            Get-Process -Name 'clash-verge','Clash Verge' -ErrorAction SilentlyContinue | Stop-Process -Force
+            Start-Sleep 2
+            if ($cv) { Start-Process $cv } else { "FIX:未找到 Clash Verge 可执行文件,请手动启动" }
+            for ($i = 0; $i -lt 40; $i++) { if (Test-TunUp) { break }; Start-Sleep 1 }
+            if (Test-RulesPinned) { "FIX:置顶规则 ✓" } else { "FIX:置顶规则 ✗(请重启 Clash Verge)" }
+        }
     }
 
     # C. 出口IP最终验证
@@ -199,12 +228,26 @@ function Invoke-Status {
     "current=$cur hasA=$hasA hasB=$hasB"
 }
 
+# -Name 不分大小写,会连带匹配 Claude Code CLI(claude.exe);切换的是桌面版数据,不碰 CLI
+function Get-ClaudeApp { Get-Process -Name 'Claude' -ErrorAction SilentlyContinue | Where-Object { $_.Path -ne "$env:USERPROFILE\.local\bin\claude.exe" } }
+
 function Stop-ClaudeApp {
-    $p = Get-Process -Name 'Claude' -ErrorAction SilentlyContinue
+    $p = Get-ClaudeApp
     if (-not $p) { return $true }
     $p | Stop-Process -Force
-    for ($i = 0; $i -lt 15; $i++) { if (-not (Get-Process -Name 'Claude' -ErrorAction SilentlyContinue)) { return $true }; Start-Sleep 1 }
+    for ($i = 0; $i -lt 15; $i++) { if (-not (Get-ClaudeApp)) { return $true }; Start-Sleep 1 }
     return $false
+}
+
+# 运行中取进程路径,否则查卸载注册表;旧逻辑只搜 %LOCALAPPDATA%\Programs,装在别的盘就找不到
+function Get-ClashExe {
+    $p = (Get-Process -Name 'clash-verge' -ErrorAction SilentlyContinue | Select-Object -First 1).Path
+    if (-not $p) {
+        $p = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue |
+              Where-Object { $_.DisplayName -like 'Clash Verge*' } | Select-Object -First 1).DisplayIcon -replace '"', ''
+    }
+    if ($p -and (Test-Path $p)) { return $p }
+    return $null
 }
 
 function Save-Account($name) {
@@ -259,5 +302,6 @@ switch ($args[0]) {
     'status' { Invoke-Status }
     'fix'    { Invoke-Fix }
     'switch' { Invoke-Switch $args[1] }
-    default  { "用法: claude-switch.ps1 checkdetail|status|fix|switch A|B" }
+    'pinrules' { Set-PinScript }
+    default  { "用法: claude-switch.ps1 checkdetail|status|fix|switch A|B|pinrules" }
 }

@@ -7,7 +7,8 @@ while ($true) {
     $coreUp = [bool](Get-Process -Name 'verge-mihomo' -ErrorAction SilentlyContinue)
     $tunUp  = [bool](Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -like '198.18.*' })
     if (-not ($coreUp -and $tunUp)) {
-        $p = Get-Process -Name 'Claude' -ErrorAction SilentlyContinue
+        # -Name 不分大小写,会连带匹配 Claude Code CLI(claude.exe);排除它,免得掉线时连带杀掉正在跑的 CLI 会话
+        $p = Get-Process -Name 'Claude' -ErrorAction SilentlyContinue | Where-Object { $_.Path -ne "$env:USERPROFILE\.local\bin\claude.exe" }
         if ($p) {
             $p | Stop-Process -Force
             "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') 代理离线(内核或TUN丢失),已自动关闭 Claude" | Out-File -Append -Encoding utf8 $LOG
