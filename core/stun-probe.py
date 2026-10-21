@@ -61,8 +61,10 @@ def main():
         t.join(timeout=3)
     print("RESULT:" + (",".join(found) if found else "NONE"))
 
-signal.signal(signal.SIGALRM, _alarm)
-signal.alarm(10)
+# Windows 无 SIGALRM:跳过硬超时,每个线程的 join(timeout=3) 仍兜底
+if hasattr(signal, "SIGALRM"):
+    signal.signal(signal.SIGALRM, _alarm)
+    signal.alarm(10)
 try:
     main()
 except TimeoutError:
